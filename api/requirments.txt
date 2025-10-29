@@ -1,0 +1,6 @@
+fastapi[all]
+uvicorn
+pypdf
+psycopg2-binary
+ollama
+nltk
