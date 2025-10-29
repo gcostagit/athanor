@@ -7,10 +7,9 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from pydantic import BaseModel
 from contextlib import contextmanager
 import io
-import os  # Importante
+import os
 
-# --- Configuración ---
-# Lee las variables de entorno de Docker
+# --- Configuración (Lectura de Variables de Entorno) --------------------------
 DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_USER = os.getenv("DB_USER", "admin")
 DB_PASS = os.getenv("DB_PASS", "admin")
@@ -23,21 +22,18 @@ DB_PARAMS = {
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 
-# Modelos
+# MODELOS ESTRATÉGICOS: BGE-M3 para embedding, Mistral para 32K tokens de memoria
 EMBEDDING_MODEL = "bge-m3"
-GENERATION_MODEL = "llama3:70b"  # Ajusta si usas otro (ej: llama3:8b)
-VECTOR_DIMENSION = 1024  # Dimensión de bge-m3
+GENERATION_MODEL = "mistral:7b"  # <--- ¡CORRECCIÓN! Usamos Mistral 7B para los 32K tokens
+VECTOR_DIMENSION = 1024
 
-# Cliente de Ollama que apunta al contenedor
 client = ollama.Client(host=OLLAMA_HOST)
-
-# NLTK (para chunking)
 nltk.download('punkt', quiet=True)
 
-app = FastAPI(title="AI Backend PoC")
+app = FastAPI(title="Athanor AI Backend")
 
 
-# --- Base de Datos ---
+# --- Lógica de Conexión y Base de Datos (Mantenida) ---
 
 @contextmanager
 def get_db_connection():
@@ -68,7 +64,7 @@ def setup_database():
     print("Base de datos configurada y lista.")
 
 
-# --- Endpoints ---
+# --- ENDPOINT DE INGESTA (/upload) (Mantenido) ---
 
 @app.post("/upload")
 async def upload_pdf(file: UploadFile = File(...)):
@@ -80,8 +76,7 @@ async def upload_pdf(file: UploadFile = File(...)):
         pdf_reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
 
         full_text = ""
-        for page in pdf_reader.pages:
-            full_text += page.extract_text() or ""
+        for page in pdf_reader.pages: full_text += page.extract_text() or ""
 
         chunks = nltk.sent_tokenize(full_text)
 
@@ -110,6 +105,8 @@ async def upload_pdf(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Error al procesar el archivo: {e}")
 
 
+# --- ENDPOINT DE GENERACIÓN (/generate) (Corregido el Rol) ---
+
 class QueryRequest(BaseModel):
     pregunta: str
     top_k: int = 5
@@ -118,12 +115,14 @@ class QueryRequest(BaseModel):
 @app.post("/generate")
 async def generate_response(request: QueryRequest):
     try:
+        # 1. Vectorizar la pregunta (con BGE-M3)
         response = client.embeddings(
             model=EMBEDDING_MODEL,
             prompt=request.pregunta
         )
         query_embedding = response["embedding"]
 
+        # 2. Buscar en pgvector los chunks más relevantes
         context_chunks = []
         with get_db_connection() as conn:
             with conn.cursor() as cur:
@@ -131,28 +130,36 @@ async def generate_response(request: QueryRequest):
                     "SELECT chunk FROM documents ORDER BY embedding <-> %s::vector LIMIT %s",
                     (str(query_embedding), request.top_k)
                 )
-                results = cur.fetchall()
-                context_chunks = [row[0] for row in results]
+                context_chunks = [row[0] for row in cur.fetchall()]
 
         if not context_chunks:
-            return {"respuesta": "No encontré información relevante.", "contexto": []}
+            return {
+                "respuesta": "Lo siento, la información para responder a esta pregunta no se encuentra en el material de estudio que tengo indexado.",
+                "contexto": []}
 
+        # 3. Definición del Rol (SYSTEM PROMPT 'Athanor Tutor')
         context_str = "\n\n".join(context_chunks)
+        system_prompt = """
+        Eres 'Athanor Tutor', un experto de IA diseñado para generar exámenes y planes de estudio.
+        Tu rol es estricto, formal, objetivo y siempre debes basarte SÓLO en la información contenida en la sección CONTEXTO.
+        Si la información de CONTEXTO no es suficiente, responde: "Lo siento, la información para responder a esta pregunta no se encuentra en el material de estudio que tengo indexado."
+        Tu respuesta debe ser concisa y académica.
+        """
+
         prompt = f"""
-        Usando SÓLO el siguiente contexto, responde la pregunta.
-        Contexto:
+        CONTEXTO:
         ---
         {context_str}
         ---
-        Pregunta: {request.pregunta}
+
+        PREGUNTA DEL USUARIO: {request.pregunta}
         """
 
-        print(f"Enviando prompt a {GENERATION_MODEL}...")
-
+        # 4. Llamar a Mistral 7B (32K tokens) para generar la respuesta
         ollama_response = client.chat(
             model=GENERATION_MODEL,
             messages=[
-                {'role': 'system', 'content': 'Responde basándote estrictamente en el contexto.'},
+                {'role': 'system', 'content': system_prompt},
                 {'role': 'user', 'content': prompt}
             ],
             stream=False
@@ -161,6 +168,7 @@ async def generate_response(request: QueryRequest):
         respuesta = ollama_response['message']['content']
 
         return {"respuesta": respuesta, "contexto": context_chunks}
+
     except Exception as e:
         print(f"Error en la generación: {e}")
         raise HTTPException(status_code=500, detail=f"Error en la generación: {e}")
@@ -168,9 +176,8 @@ async def generate_response(request: QueryRequest):
 
 # --- Inicio ---
 if __name__ == "__main__":
-    # La configuración de la BD la maneja el contenedor al iniciar
-    print("Iniciando servidor FastAPI en http://localhost:8000")
+    setup_database()
+    print(f"Iniciando Athanor PoC con {GENERATION_MODEL} en http://localhost:8000")
     uvicorn.run(app, host="0.0.0.0", port=8000)
 else:
-    # Asegurarse de que la BD se configure cuando uvicorn importa el módulo
     setup_database()

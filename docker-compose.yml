@@ -1,7 +1,6 @@
 version: '3.8'
 
 services:
-  # Servicio 1: El Backend (FastAPI)
   api:
     build: ./api
     ports:
@@ -17,7 +16,6 @@ services:
       - ollama
     restart: always
 
-  # Servicio 2: La Base de Datos (PostgreSQL + pgvector)
   db:
     image: ankane/pgvector
     environment:
@@ -27,10 +25,9 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "5432:5432" # Opcional: Exponer a la VM host para depuración
+      - "5432:5432"
     restart: always
 
-  # Servicio 3: El Servidor de IA (Ollama)
   ollama:
     image: ollama/ollama
     ports:
